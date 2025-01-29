@@ -87,3 +87,5 @@ MIT License
 
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first.
+
+-url='jdbc:oracle:thin:@//dbfcsprd01.app.erpcsprv.oraclevcn.com:15232/atcstls2_dbs01.dbprod.exacsprv.oraclevcn.com' -usr=dbsign -pwd=dbsign

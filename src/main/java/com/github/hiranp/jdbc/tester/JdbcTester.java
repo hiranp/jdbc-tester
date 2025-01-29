@@ -7,10 +7,24 @@ import java.net.Socket;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.stream.Collectors;
+import java.util.logging.Logger;
+import java.util.logging.Level;
+import java.util.logging.ConsoleHandler;
+import java.util.logging.SimpleFormatter;
 
 public class JdbcTester {
+    private static final Logger LOGGER = Logger.getLogger(JdbcTester.class.getName());
     private static final String VERSION = "25.01.29";
     private static final int CONNECTION_TIMEOUT = 5000; // 5 seconds
+    private static boolean debugMode = false;
+
+    static {
+        // Configure logger
+        ConsoleHandler handler = new ConsoleHandler();
+        handler.setFormatter(new SimpleFormatter());
+        LOGGER.addHandler(handler);
+        LOGGER.setUseParentHandlers(false);
+    }
 
     public static boolean isNullOrEmpty(String str) {
         return str == null || str.trim().isEmpty();
@@ -30,50 +44,102 @@ public class JdbcTester {
     }
 
     private static String[] extractHostAndPort(String jdbcUrl) {
+        LOGGER.log(Level.FINE, "Parsing JDBC URL: {0}", jdbcUrl);
         try {
             if (jdbcUrl.startsWith("jdbc:oracle:thin:")) {
-                // Handle Oracle's formats
-                String urlPart;
-                if (jdbcUrl.contains("@//")) {
-                    // Handle service name format: jdbc:oracle:thin:@//host:port/service
-                    urlPart = jdbcUrl.substring(jdbcUrl.indexOf("@//") + 3);
-                    String[] parts = urlPart.split("[:/{1}]");
-                    if (parts.length < 2) {
-                        throw new IllegalArgumentException("Invalid Oracle JDBC URL format. Expected format: jdbc:oracle:thin:@//host:port/service");
-                    }
-                    return new String[]{parts[0], parts[1]};
-                } else if (jdbcUrl.contains("@")) {
-                    // Handle SID format: jdbc:oracle:thin:@host:port:sid
-                    urlPart = jdbcUrl.substring(jdbcUrl.indexOf("@") + 1);
-                    String[] parts = urlPart.split(":");
-                    if (parts.length < 2) {
-                        throw new IllegalArgumentException("Invalid Oracle JDBC URL format. Expected format: jdbc:oracle:thin:@host:port:sid");
-                    }
-                    return new String[]{parts[0], parts[1]};
-                } else {
-                    throw new IllegalArgumentException("Invalid Oracle JDBC URL format");
-                }
+                return parseOracleUrl(jdbcUrl);
             } else {
-                // Handle standard JDBC URLs
-                String cleanUrl = jdbcUrl.replace("jdbc:", "");
-                // Handle MySQL style URLs that might contain parameters
-                if (cleanUrl.contains("?")) {
-                    cleanUrl = cleanUrl.substring(0, cleanUrl.indexOf("?"));
-                }
-                URI uri = new URI(cleanUrl);
-                int port = uri.getPort();
-                if (port == -1) {
-                    // Assign default ports based on database type
-                    if (jdbcUrl.contains("mysql")) port = 3306;
-                    else if (jdbcUrl.contains("oracle")) port = 1521;
-                    else if (jdbcUrl.contains("postgresql")) port = 5432;
-                    else if (jdbcUrl.contains("sqlserver")) port = 1433;
-                }
-                return new String[]{uri.getHost(), String.valueOf(port)};
+                return parseStandardUrl(jdbcUrl);
             }
-        } catch (URISyntaxException e) {
+        } catch (Exception e) {
+            LOGGER.log(Level.SEVERE, "Failed to parse JDBC URL: " + jdbcUrl, e);
             throw new IllegalArgumentException("Invalid JDBC URL format: " + jdbcUrl, e);
         }
+    }
+
+    private static String[] parseOracleUrl(String jdbcUrl) {
+        String urlPart;
+        if (jdbcUrl.contains("@//")) {
+            // Handle service name format
+            urlPart = jdbcUrl.substring(jdbcUrl.indexOf("@//") + 3);
+            LOGGER.log(Level.FINE, "Parsing Oracle service name format. URL part: {0}", urlPart);
+            
+            int colonIndex = urlPart.indexOf(':');
+            if (colonIndex == -1) {
+                throw new IllegalArgumentException("Missing port number in Oracle URL");
+            }
+            
+            String host = urlPart.substring(0, colonIndex);
+            String remaining = urlPart.substring(colonIndex + 1);
+            
+            int slashIndex = remaining.indexOf('/');
+            if (slashIndex == -1) {
+                throw new IllegalArgumentException("Missing service name in Oracle URL");
+            }
+            
+            String portStr = remaining.substring(0, slashIndex);
+            LOGGER.log(Level.FINE, "Extracted host: {0}", host);
+            LOGGER.log(Level.FINE, "Extracted port: {0}", portStr);
+            
+            // Validate port number
+            try {
+                Integer.parseInt(portStr);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Invalid port number: " + portStr);
+            }
+            
+            return new String[]{host, portStr};
+        } else if (jdbcUrl.contains("@")) {
+            // Handle SID format
+            urlPart = jdbcUrl.substring(jdbcUrl.indexOf("@") + 1);
+            int colonIndex = urlPart.indexOf(':');
+            if (colonIndex == -1) {
+                throw new IllegalArgumentException("Invalid Oracle JDBC URL format. Expected format: jdbc:oracle:thin:@host:port:sid");
+            }
+            String host = urlPart.substring(0, colonIndex);
+            String remaining = urlPart.substring(colonIndex + 1);
+            int nextColonIndex = remaining.indexOf(':');
+            if (nextColonIndex == -1) {
+                throw new IllegalArgumentException("Invalid Oracle JDBC URL format. Missing port or SID.");
+            }
+            String port = remaining.substring(0, nextColonIndex);
+            return new String[]{host, port};
+        }
+        throw new IllegalArgumentException("Unsupported Oracle URL format");
+    }
+
+    private static String[] parseStandardUrl(String jdbcUrl) {
+        try {
+            String cleanUrl = jdbcUrl.replace("jdbc:", "");
+            if (cleanUrl.contains("?")) {
+                cleanUrl = cleanUrl.substring(0, cleanUrl.indexOf("?"));
+            }
+            LOGGER.log(Level.FINE, "Parsing standard URL: {0}", cleanUrl);
+            
+            URI uri = new URI(cleanUrl);
+            String host = uri.getHost();
+            int port = uri.getPort();
+            
+            if (port == -1) {
+                port = getDefaultPort(jdbcUrl);
+            }
+            
+            LOGGER.log(Level.FINE, "Extracted host: {0}", host);
+            LOGGER.log(Level.FINE, "Extracted/default port: {0}", port);
+            
+            return new String[]{host, String.valueOf(port)};
+        } catch (URISyntaxException e) {
+            LOGGER.log(Level.SEVERE, "Invalid standard JDBC URL format: " + jdbcUrl, e);
+            throw new IllegalArgumentException("Invalid standard JDBC URL format: " + jdbcUrl, e);
+        }
+    }
+
+    private static int getDefaultPort(String jdbcUrl) {
+        if (jdbcUrl.contains("mysql")) return 3306;
+        if (jdbcUrl.contains("oracle")) return 1521;
+        if (jdbcUrl.contains("postgresql")) return 5432;
+        if (jdbcUrl.contains("sqlserver")) return 1433;
+        return -1;
     }
 
     private static boolean testNetworkConnectivity(String host, int port) {
@@ -91,8 +157,15 @@ public class JdbcTester {
     public static void main(String... args) {
         String usr = null, pwd = null, url = null, sql = null;
 
+        // Process command line arguments
         if (args != null && args.length > 0) {
             for (String arg : args) {
+                if (arg.equals("-debug")) {
+                    debugMode = true;
+                    LOGGER.setLevel(Level.FINE);
+                    Arrays.stream(LOGGER.getHandlers()).forEach(h -> h.setLevel(Level.FINE));
+                    continue;
+                }
                 if (arg.startsWith("-url=")) {
                     url = arg.substring(5);
                 } else if (arg.startsWith("-usr=")) {
@@ -116,16 +189,22 @@ public class JdbcTester {
 
                     String[] hostPort = extractHostAndPort(url);
                     String host = hostPort[0];
-                    int port = Integer.parseInt(hostPort[1]);
-
-                    // Test network connectivity first
-                    if (testNetworkConnectivity(host, port)) {
-                        // Determine driver automatically
-                        String drv = determineDriver(url);
-                        new JdbcTester().run(url, drv, usr, pwd, sql);
+                    
+                    try {
+                        int port = Integer.parseInt(hostPort[1]);
+                        // Test network connectivity first
+                        if (testNetworkConnectivity(host, port)) {
+                            String drv = determineDriver(url);
+                            new JdbcTester().run(url, drv, usr, pwd, sql);
+                        }
+                    } catch (NumberFormatException e) {
+                        System.err.println("ERROR: Invalid port number format: " + hostPort[1]);
+                        System.err.println("Please check the JDBC URL format");
+                        e.printStackTrace();
                     }
                 } catch (Exception ex) {
-                    System.err.println("Error: " + ex.getMessage());
+                    System.err.println("ERROR: Failed to process JDBC URL: " + url);
+                    System.err.println("Cause: " + ex.getMessage());
                     ex.printStackTrace();
                 }
             } else {
@@ -139,7 +218,7 @@ public class JdbcTester {
     private static void printUsage(String[] args) {
         System.out.println("Missing or incorrect arguments: " + Arrays.toString(args));
         System.out.printf("JDBC Tester v%s - Test JDBC connectivity and execute a query%n%n", VERSION);
-        System.out.println("Usage: -url=jdbc_url [-usr=jdbc_usr] [-pwd=jdbc_pwd] [-sqlf=/path_to/sql_statement]\n");
+        System.out.println("Usage: -url=jdbc_url [-usr=jdbc_usr] [-pwd=jdbc_pwd] [-sqlf=/path_to/sql_statement] [-debug]\n");
         System.out.println("Examples:");
         System.out.println("  Oracle:");
         System.out.println("    java -jar jdbc-tester.jar -url='jdbc:oracle:thin:@//localhost:1521/service' -usr=$DB_USER -pwd=$DB_PASS  // Service name format (recommended)");
